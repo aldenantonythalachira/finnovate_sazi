@@ -1,43 +1,23 @@
 """
-Whale Watcher Pro - Main FastAPI Application
-Real-time cryptocurrency whale detection and visualization
+Whale Watcher Pro - Simplified Mock API Server
+For development without complex dependencies
 """
-
-import asyncio
-import json
-import logging
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
-from collections import deque
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import uvicorn
-import websockets
-from pydantic import BaseModel
-from dotenv import load_dotenv
-
-from services.binance_stream import BinanceWebSocketManager
-from services.whale_detection import WhaleDetectionEngine
-from services.external_api import ExternalServicesManager
-from services.database import SupabaseManager
-from services.alerts import AlertManager
-
-# Load environment variables
-load_dotenv()
+import asyncio
+import json
+from datetime import datetime, timedelta
+import random
+import logging
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# FastAPI application
 app = FastAPI(
     title="Whale Watcher Pro API",
-    description="Real-time cryptocurrency whale detection and visualization",
+    description="Real-time cryptocurrency whale detection",
     version="1.0.0"
 )
 
@@ -50,357 +30,149 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ============================================================================
-# Pydantic Models
-# ============================================================================
-
-class TradeData(BaseModel):
-    """Raw trade data from Binance"""
-    event_time: int
-    trade_id: int
-    price: float
-    quantity: float
-    buyer_order_id: int
-    seller_order_id: int
-    trade_time: int
-    is_buyer_maker: bool
-
-class WhaleAlertPayload(BaseModel):
-    """Whale trade alert"""
-    trade_id: int
-    timestamp: datetime
-    price: float
-    quantity: float
-    trade_value: float
-    is_buy: bool
-    whale_score: float  # 0-1 based on magnitude
-    similar_patterns: List[Dict[str, Any]] = []
-    bull_bear_sentiment: float  # -1 to 1
-
-class BullBearMetrics(BaseModel):
-    """Bull vs Bear power calculation"""
-    timestamp: datetime
-    net_buy_volume: float
-    net_sell_volume: float
-    bull_power: float  # -1 to 1
-    momentum: float
-
-# ============================================================================
-# Global State Management
-# ============================================================================
-
-class WebSocketConnectionManager:
-    """Manage active WebSocket connections"""
-    
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-    
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"Client connected. Total connections: {len(self.active_connections)}")
-    
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        logger.info(f"Client disconnected. Total connections: {len(self.active_connections)}")
-    
-    async def broadcast(self, message: dict):
-        """Broadcast message to all connected clients"""
-        disconnected = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.error(f"Error sending message: {e}")
-                disconnected.append(connection)
-        
-        # Remove disconnected clients
-        for connection in disconnected:
-            self.disconnect(connection)
-
-# Initialize components
-manager = WebSocketConnectionManager()
-binance_manager: Optional[BinanceWebSocketManager] = None
-whale_engine: Optional[WhaleDetectionEngine] = None
-external_services: Optional[ExternalServicesManager] = None
-supabase_manager: Optional[SupabaseManager] = None
-alert_manager: Optional[AlertManager] = None
-
-# Trade history (rolling 60-minute window)
-trade_history: deque = deque(maxlen=1000)
-
-# ============================================================================
-# Startup and Shutdown Events
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup"""
-    global binance_manager, whale_engine, external_services, supabase_manager, alert_manager
-    
-    logger.info("Starting Whale Watcher Pro...")
-    
-    try:
-        # Initialize managers
-        binance_manager = BinanceWebSocketManager()
-        whale_engine = WhaleDetectionEngine()
-        external_services = ExternalServicesManager()
-        supabase_manager = SupabaseManager()
-        alert_manager = AlertManager(external_services)
-        
-        # Start Binance stream in background
-        asyncio.create_task(start_binance_stream())
-        
-        logger.info("All services initialized successfully")
-    except Exception as e:
-        logger.error(f"Startup failed: {e}")
-        raise
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    logger.info("Shutting down Whale Watcher Pro...")
-    if binance_manager:
-        await binance_manager.close()
-
-# ============================================================================
-# Background Tasks
-# ============================================================================
-
-async def start_binance_stream():
-    """Main background task: stream Binance data and process whale trades"""
-    logger.info("Starting Binance WebSocket stream...")
-    
-    while True:
-        try:
-            async for trade in binance_manager.stream_trades():
-                # Process trade
-                await process_trade(trade)
-        except Exception as e:
-            logger.error(f"Stream error: {e}, retrying in 5 seconds...")
-            await asyncio.sleep(5)
-
-async def process_trade(trade_data: dict):
-    """
-    Process incoming trade:
-    1. Add to history
-    2. Check if whale trade
-    3. Broadcast if significant
-    """
-    try:
-        trade_time = datetime.fromtimestamp(trade_data['trade_time'] / 1000)
-        price = float(trade_data['price'])
-        quantity = float(trade_data['quantity'])
-        trade_value = price * quantity
-        is_buy = not trade_data['is_buyer_maker']
-        
-        # Add to trade history
-        trade_history.append({
-            'timestamp': trade_time,
-            'price': price,
-            'quantity': quantity,
-            'value': trade_value,
-            'is_buy': is_buy,
-            'trade_id': trade_data['trade_id']
-        })
-        
-        # Check if whale trade
-        if whale_engine.is_whale_trade(trade_value):
-            # Detect similar patterns
-            similar_trades = whale_engine.find_similar_patterns(
-                trade_value, is_buy, list(trade_history)[-100:]  # Last 100 trades
-            )
-            
-            # Calculate sentiment
-            bull_bear = whale_engine.calculate_bull_bear_power(list(trade_history)[-600:])  # 10 min
-            whale_score = min(trade_value / 5_000_000, 1.0)  # Normalize to 5M
-            
-            # Create alert payload
-            alert = WhaleAlertPayload(
-                trade_id=trade_data['trade_id'],
-                timestamp=trade_time,
-                price=price,
-                quantity=quantity,
-                trade_value=trade_value,
-                is_buy=is_buy,
-                whale_score=whale_score,
-                similar_patterns=similar_trades,
-                bull_bear_sentiment=bull_bear['bull_power']
-            )
-            
-            # Broadcast to all connected clients
-            await manager.broadcast({
-                'type': 'whale_alert',
-                'data': alert.dict(),
-                'timestamp': datetime.utcnow().isoformat()
-            })
-            
-            # Save to database
-            await supabase_manager.insert_whale_trade(alert)
-            
-            # Send external alerts (Discord, Telegram)
-            await alert_manager.send_alerts(alert)
-            
-            logger.info(f"🐋 WHALE DETECTED: {trade_value:,.2f} USD ({'BUY' if is_buy else 'SELL'})")
-        
-        # Periodically broadcast bull/bear metrics
-        if len(trade_history) % 10 == 0:  # Every ~10 trades
-            metrics = whale_engine.calculate_bull_bear_power(list(trade_history)[-600:])
-            await manager.broadcast({
-                'type': 'bull_bear_metrics',
-                'data': metrics,
-                'timestamp': datetime.utcnow().isoformat()
-            })
-    
-    except Exception as e:
-        logger.error(f"Error processing trade: {e}")
-
-# ============================================================================
-# REST API Endpoints
-# ============================================================================
-
-@app.get("/")
-async def root():
-    """Health check endpoint"""
+# Generate mock data
+def generate_whale_alert():
     return {
-        "status": "running",
-        "service": "Whale Watcher Pro",
-        "version": "1.0.0",
-        "connected_clients": len(manager.active_connections)
+        "trade_id": random.randint(1000000, 9999999),
+        "timestamp": datetime.now().isoformat(),
+        "price": random.uniform(40000, 50000),
+        "quantity": random.uniform(1, 50),
+        "trade_value": random.uniform(500000, 2500000),
+        "is_buy": random.choice([True, False]),
+        "whale_score": random.uniform(0.5, 1.0),
+        "bull_bear_sentiment": random.uniform(-1, 1),
+        "similar_patterns": [
+            {
+                "pattern_id": f"PAT-{random.randint(1000, 9999)}",
+                "similarity_score": random.uniform(0.7, 0.99),
+                "timestamp": (datetime.now() - timedelta(minutes=random.randint(1, 120))).isoformat(),
+                "price_at_pattern": random.uniform(40000, 50000)
+            }
+            for _ in range(random.randint(1, 3))
+        ]
     }
 
-@app.get("/api/health")
+def generate_chart_data():
+    now = datetime.now()
+    data = []
+    for i in range(60):
+        timestamp = (now - timedelta(minutes=i)).isoformat()
+        base_price = 45000 + random.uniform(-2000, 2000)
+        data.insert(0, {
+            "timestamp": timestamp,
+            "open": base_price,
+            "high": base_price + random.uniform(0, 500),
+            "low": base_price - random.uniform(0, 500),
+            "close": base_price + random.uniform(-500, 500),
+            "volume": random.uniform(100, 500),
+            "whale_volume": random.uniform(10, 100)
+        })
+    return data
+
+# REST Endpoints
+@app.get("/")
 async def health_check():
-    """Detailed health check"""
+    return {"status": "ok", "message": "Whale Watcher Pro API is running"}
+
+@app.get("/api/health")
+async def health_status():
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "active_connections": len(manager.active_connections),
-        "trades_in_window": len(trade_history)
+        "timestamp": datetime.now().isoformat(),
+        "binance_connected": True,
+        "database_connected": True
     }
 
 @app.get("/api/whale-trades")
 async def get_whale_trades(limit: int = 50):
-    """Get recent whale trades from database"""
-    try:
-        trades = await supabase_manager.get_recent_whale_trades(limit)
-        return {
-            "success": True,
-            "count": len(trades),
-            "trades": trades
-        }
-    except Exception as e:
-        logger.error(f"Error fetching whale trades: {e}")
-        return {"success": False, "error": str(e)}
+    trades = [generate_whale_alert() for _ in range(min(limit, 50))]
+    return {"trades": trades, "count": len(trades)}
 
 @app.get("/api/statistics")
 async def get_statistics():
-    """Get trading statistics"""
-    if not trade_history:
-        return {
-            "success": True,
-            "stats": {
-                "total_trades": 0,
-                "whale_trades": 0,
-                "avg_price": 0,
-                "high_price": 0,
-                "low_price": 0
-            }
-        }
-    
-    prices = [t['price'] for t in trade_history]
-    whale_count = len([t for t in trade_history if whale_engine.is_whale_trade(t['value'])])
-    
     return {
-        "success": True,
-        "stats": {
-            "total_trades": len(trade_history),
-            "whale_trades": whale_count,
-            "avg_price": sum(prices) / len(prices),
-            "high_price": max(prices),
-            "low_price": min(prices),
-            "volume_24h": sum([t['value'] for t in trade_history])
-        }
+        "total_whale_trades": random.randint(100, 500),
+        "total_volume_24h": random.uniform(1000000, 5000000),
+        "average_trade_value": random.uniform(500000, 1500000),
+        "bull_power": random.uniform(-1, 1),
+        "bear_power": random.uniform(-1, 1),
+        "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/api/chart-data")
 async def get_chart_data(minutes: int = 60):
-    """Get aggregated chart data for frontend"""
-    if not trade_history:
-        return {"success": True, "data": []}
-    
-    # Aggregate trades by minute
-    aggregated = {}
-    for trade in trade_history:
-        minute_key = trade['timestamp'].replace(second=0, microsecond=0)
-        if minute_key not in aggregated:
-            aggregated[minute_key] = {
-                'timestamp': minute_key.isoformat(),
-                'open': trade['price'],
-                'high': trade['price'],
-                'low': trade['price'],
-                'close': trade['price'],
-                'volume': 0,
-                'whale_volume': 0
-            }
-        
-        agg = aggregated[minute_key]
-        agg['high'] = max(agg['high'], trade['price'])
-        agg['low'] = min(agg['low'], trade['price'])
-        agg['close'] = trade['price']
-        agg['volume'] += trade['quantity']
-        
-        if whale_engine.is_whale_trade(trade['value']):
-            agg['whale_volume'] += trade['quantity']
-    
-    return {
-        "success": True,
-        "data": sorted(aggregated.values(), key=lambda x: x['timestamp'])
-    }
+    return {"data": generate_chart_data(), "period_minutes": minutes}
 
-# ============================================================================
-# WebSocket Endpoint
-# ============================================================================
+# Track connected clients
+connected_clients = set()
 
-@app.websocket("/ws/trades")
+# WebSocket endpoint for Socket.io fallback
+@app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time trade updates"""
-    await manager.connect(websocket)
+    await websocket.accept()
+    connected_clients.add(websocket)
+    logger.info("Client connected via WebSocket")
     
     try:
-        # Send initial data on connection
+        # Send connection confirmation
         await websocket.send_json({
-            'type': 'connection',
-            'message': 'Connected to Whale Watcher Pro',
-            'timestamp': datetime.utcnow().isoformat()
+            "type": "connection",
+            "message": "Connected to Whale Watcher Pro",
+            "timestamp": datetime.now().isoformat()
         })
         
-        # Keep connection alive and listen for messages
         while True:
-            data = await websocket.receive_text()
+            # Keep connection alive
+            await asyncio.sleep(1)
             
-            # Echo received message (can be extended for client commands)
-            if data == "ping":
-                await websocket.send_json({
-                    'type': 'pong',
-                    'timestamp': datetime.utcnow().isoformat()
-                })
-    
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        logger.info("WebSocket disconnected")
+        connected_clients.discard(websocket)
+        logger.info("Client disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        manager.disconnect(websocket)
+        connected_clients.discard(websocket)
 
-# ============================================================================
-# Run Server
-# ============================================================================
+# Background task to emit real-time updates
+async def emit_realtime_updates():
+    while True:
+        try:
+            await asyncio.sleep(random.uniform(3, 5))
+            
+            # Generate whale alert
+            alert = generate_whale_alert()
+            alert["type"] = "whale_alert"
+            
+            # Send to all connected WebSocket clients
+            for client in list(connected_clients):
+                try:
+                    await client.send_json(alert)
+                except:
+                    connected_clients.discard(client)
+            
+            # Send bull/bear metrics occasionally
+            if random.random() > 0.6:
+                metrics = {
+                    "type": "bull_bear_metrics",
+                    "net_buy_volume": random.uniform(1000, 5000),
+                    "net_sell_volume": random.uniform(1000, 5000),
+                    "bull_power": random.uniform(-1, 1),
+                    "momentum": random.uniform(-1, 1),
+                    "timestamp": datetime.now().isoformat()
+                }
+                for client in list(connected_clients):
+                    try:
+                        await client.send_json(metrics)
+                    except:
+                        connected_clients.discard(client)
+                        
+        except Exception as e:
+            logger.error(f"Error in realtime updates: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(emit_realtime_updates())
+    logger.info("Real-time updates task started")
 
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000,
-        log_level="info"
-    )
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

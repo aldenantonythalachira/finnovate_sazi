@@ -7,7 +7,7 @@ import { useTradeStore } from '@/store/tradeStore';
 import { WhaleAlertFeed } from '@/components/WhaleAlertFeed';
 import { PriceChart } from '@/components/PriceChart';
 import { BullBearMeter } from '@/components/BullBearMeter';
-import { ThreeDVisualizer } from '@/components/ThreeDVisualizer';
+// import { ThreeDVisualizer } from '@/components/ThreeDVisualizer'; // Disabled: incompatible with latest Next.js
 import { BitcoinInfo } from '@/components/BitcoinInfo';
 import { ChartDataPoint, Trade3D } from '@/lib/types';
 import toast from 'react-hot-toast';
@@ -22,7 +22,7 @@ export default function Home() {
     bullBearMetrics,
     isConnected,
     clearAlerts,
-  } = useWebSocket('http://localhost:8000');
+  } = useWebSocket('ws://localhost:8000/ws');
 
   // Fetch chart data on mount and periodically
   useEffect(() => {
@@ -228,7 +228,8 @@ export default function Home() {
           </motion.div>
         </motion.div>
 
-        {/* 3D Visualization */}
+        {/* 3D Visualization - Disabled: incompatible with latest Next.js */}
+        {/* 
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -236,6 +237,7 @@ export default function Home() {
         >
           <ThreeDVisualizer trades={trades3D} />
         </motion.div>
+        */}
       </main>
 
       {/* Footer */}
