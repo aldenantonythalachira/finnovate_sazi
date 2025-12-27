@@ -1,57 +1,32 @@
 """
-Whale Watcher Pro - Main FastAPI Application
-Real-time cryptocurrency whale detection and visualization
+Whale Watcher Pro - Live Binance API Server
+Provides REST + WebSocket endpoints for live BTC/USDT data
 """
 
 import asyncio
-import json
 import logging
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+import math
+import time
+
+import httpx
 from collections import deque
+from datetime import datetime, timedelta
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import uvicorn
-import websockets
-from pydantic import BaseModel
-from dotenv import load_dotenv
 
-from services.binance_stream import BinanceWebSocketManager
-from services.whale_detection import WhaleDetectionEngine
-from services.external_api import ExternalServicesManager
-from services.database import SupabaseManager
-from services.alerts import AlertManager
-
-# Throttling
-TRADE_TICK_HZ = 20
-DEPTH_HZ = 1
-LABEL_HZ = 1
-
-last_trade_emit = 0.0
-last_depth_emit = 0.0
-
-# Replay
-replay_buffer = deque(maxlen=200_000)
-replay_active = False
-replay_speed = 10
-
-# Load environment variables
-load_dotenv()
+from .services.binance_stream import BinanceWebSocketManager, BinanceDepthStreamManager
+from .services.whale_detection import WhaleDetectionEngine, InstitutionalExecutionDetector
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# FastAPI application
 app = FastAPI(
     title="Whale Watcher Pro API",
-    description="Real-time cryptocurrency whale detection and visualization",
-    version="1.0.0"
+    description="Real-time cryptocurrency whale detection",
+    version="1.0.0",
 )
 
 # CORS middleware
@@ -63,392 +38,515 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ============================================================================
-# Pydantic Models
-# ============================================================================
+# Live services
+trade_stream = BinanceWebSocketManager("btcusdt")
+depth_stream = BinanceDepthStreamManager("btcusdt", depth_level=20)
+whale_engine = WhaleDetectionEngine()
+institutional_detector = InstitutionalExecutionDetector("BTCUSDT")
 
-class TradeData(BaseModel):
-    """Raw trade data from Binance"""
-    event_time: int
-    trade_id: int
-    price: float
-    quantity: float
-    buyer_order_id: int
-    seller_order_id: int
-    trade_time: int
-    is_buyer_maker: bool
+BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
+BINANCE_TICKER_TTL_SECONDS = 30.0
 
-class WhaleAlertPayload(BaseModel):
-    """Whale trade alert"""
-    trade_id: int
-    timestamp: datetime
-    price: float
-    quantity: float
-    trade_value: float
-    is_buy: bool
-    whale_score: float  # 0-1 based on magnitude
-    similar_patterns: List[Dict[str, Any]] = []
-    bull_bear_sentiment: float  # -1 to 1
+# In-memory state
+connected_clients: set[WebSocket] = set()
+recent_trades: deque = deque(maxlen=6000)
+recent_institutional_events: deque = deque(maxlen=300)
+latest_order_book: Dict[str, Any] = {
+    "last_update_id": None,
+    "bids": [],
+    "asks": [],
+    "timestamp": None,
+}
+last_order_book_emit = 0.0
+binance_24h_cache: Dict[str, Any] = {
+    "timestamp": 0.0,
+    "volume": None,
+    "ticker": None,
+}
 
-class BullBearMetrics(BaseModel):
-    """Bull vs Bear power calculation"""
-    timestamp: datetime
-    net_buy_volume: float
-    net_sell_volume: float
-    bull_power: float  # -1 to 1
-    momentum: float
 
-# ============================================================================
-# Global State Management
-# ============================================================================
+def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
 
-class WebSocketConnectionManager:
-    """Manage active WebSocket connections"""
-    
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-    
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"Client connected. Total connections: {len(self.active_connections)}")
-    
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        logger.info(f"Client disconnected. Total connections: {len(self.active_connections)}")
-    
-    async def broadcast(self, message: dict):
-        """Broadcast message to all connected clients"""
-        disconnected = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.error(f"Error sending message: {e}")
-                disconnected.append(connection)
-        
-        # Remove disconnected clients
-        for connection in disconnected:
-            self.disconnect(connection)
 
-# Initialize components
-manager = WebSocketConnectionManager()
-binance_manager: Optional[BinanceWebSocketManager] = None
-whale_engine: Optional[WhaleDetectionEngine] = None
-external_services: Optional[ExternalServicesManager] = None
-supabase_manager: Optional[SupabaseManager] = None
-alert_manager: Optional[AlertManager] = None
+def parse_trade(trade: Dict[str, Any]) -> Dict[str, Any]:
+    price = float(trade["price"])
+    quantity = float(trade["quantity"])
+    trade_value = price * quantity
+    trade_time = datetime.utcfromtimestamp(trade["trade_time"] / 1000)
+    is_buyer_maker = trade.get("is_buyer_maker", False)
+    is_buy = not is_buyer_maker
 
-# Trade history (rolling 60-minute window)
-trade_history: deque = deque(maxlen=1000)
-
-# ============================================================================
-# Startup and Shutdown Events
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup"""
-    global binance_manager, whale_engine, external_services, supabase_manager, alert_manager
-    
-    logger.info("Starting Whale Watcher Pro...")
-    
-    try:
-        # Initialize managers
-        binance_manager = BinanceWebSocketManager()
-        whale_engine = WhaleDetectionEngine()
-        external_services = ExternalServicesManager()
-        supabase_manager = SupabaseManager()
-        alert_manager = AlertManager(external_services)
-        
-        # Start Binance stream in background
-        asyncio.create_task(start_binance_stream())
-        
-        logger.info("All services initialized successfully")
-    except Exception as e:
-        logger.error(f"Startup failed: {e}")
-        raise
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    logger.info("Shutting down Whale Watcher Pro...")
-    if binance_manager:
-        await binance_manager.close()
-
-# ============================================================================
-# Background Tasks
-# ============================================================================
-
-async def start_binance_stream():
-    """Main background task: stream Binance data and process whale trades"""
-    logger.info("Starting Binance WebSocket stream...")
-    
-    while True:
-        try:
-            async for trade in binance_manager.stream_trades():
-                # Process trade
-                await process_trade(trade)
-        except Exception as e:
-            logger.error(f"Stream error: {e}, retrying in 5 seconds...")
-            await asyncio.sleep(5)
-
-async def process_trade(trade_data: dict):
-    """
-    Process incoming trade:
-    1. Add to history
-    2. Check if whale trade
-    3. Broadcast if significant
-    """
-    try:
-        trade_time = datetime.fromtimestamp(trade_data['trade_time'] / 1000)
-        price = float(trade_data['price'])
-        quantity = float(trade_data['quantity'])
-        trade_value = price * quantity
-        is_buy = not trade_data['is_buyer_maker']
-        
-        # Add to trade history
-        trade_history.append({
-            'timestamp': trade_time,
-            'price': price,
-            'quantity': quantity,
-            'value': trade_value,
-            'is_buy': is_buy,
-            'trade_id': trade_data['trade_id']
-        })
-
-        now = datetime.utcnow().timestamp()
-
-        if now - last_trade_emit >= 1 / TRADE_TICK_HZ:
-            tick = {
-                "type": "trade_tick",
-                "data": {
-                    "ts": trade_time.timestamp(),
-                    "price": price,
-                    "qty": quantity,
-                    "side": "buy" if is_buy else "sell"
-                }
-            }
-            await manager.broadcast(tick)
-            replay_buffer.append({"ts": trade_time.timestamp(), "event": tick})
-            last_trade_emit = now
-        
-        # Check if whale trade
-        if whale_engine.is_whale_trade(trade_value):
-            # Detect similar patterns
-            similar_trades = whale_engine.find_similar_patterns(
-                trade_value, is_buy, list(trade_history)[-100:]  # Last 100 trades
-            )
-            
-            # Calculate sentiment
-            bull_bear = whale_engine.calculate_bull_bear_power(list(trade_history)[-600:])  # 10 min
-            whale_score = min(trade_value / 5_000_000, 1.0)  # Normalize to 5M
-            
-            # Create alert payload
-            alert = WhaleAlertPayload(
-                trade_id=trade_data['trade_id'],
-                timestamp=trade_time,
-                price=price,
-                quantity=quantity,
-                trade_value=trade_value,
-                is_buy=is_buy,
-                whale_score=whale_score,
-                similar_patterns=similar_trades,
-                bull_bear_sentiment=bull_bear['bull_power']
-            )
-            
-            # Broadcast to all connected clients
-            features = whale_engine.enrich_whale_event(
-                trade_value=trade_value,
-                is_buy=is_buy,
-                price=price,
-                recent_trades=list(trade_history),
-                depth_snapshot=latest_depth
-            )
-
-            event = {
-                "type": "whale_event",
-                "data": {
-                    "ts": trade_time.timestamp(),
-                    "trade_id": trade_data["trade_id"],
-                    "price": price,
-                    "qty": quantity,
-                    "notional": trade_value,
-                    "side": "buy" if is_buy else "sell",
-                    **features
-                }
-            }
-
-            await manager.broadcast(event)
-            replay_buffer.append({"ts": trade_time.timestamp(), "event": event})
-
-            
-            # Save to database
-            await supabase_manager.insert_whale_trade(alert)
-            
-            # Send external alerts (Discord, Telegram)
-            await alert_manager.send_alerts(alert)
-            
-            logger.info(f"🐋 WHALE DETECTED: {trade_value:,.2f} USD ({'BUY' if is_buy else 'SELL'})")
-        
-        # Periodically broadcast bull/bear metrics
-        if len(trade_history) % 10 == 0:  # Every ~10 trades
-            metrics = whale_engine.calculate_bull_bear_power(list(trade_history)[-600:])
-            await manager.broadcast({
-                'type': 'bull_bear_metrics',
-                'data': metrics,
-                'timestamp': datetime.utcnow().isoformat()
-            })
-    
-    except Exception as e:
-        logger.error(f"Error processing trade: {e}")
-
-# ============================================================================
-# REST API Endpoints
-# ============================================================================
-
-@app.get("/")
-async def root():
-    """Health check endpoint"""
     return {
-        "status": "running",
-        "service": "Whale Watcher Pro",
-        "version": "1.0.0",
-        "connected_clients": len(manager.active_connections)
+        "trade_id": trade["trade_id"],
+        "timestamp": trade_time,
+        "price": price,
+        "quantity": quantity,
+        "value": trade_value,
+        "is_buy": is_buy,
+        "is_buyer_maker": is_buyer_maker,
     }
 
-@app.get("/api/health")
+
+async def broadcast(payload: Dict[str, Any]) -> None:
+    if not connected_clients:
+        return
+
+    for client in list(connected_clients):
+        try:
+            await client.send_json(payload)
+        except Exception:
+            connected_clients.discard(client)
+
+
+async def get_binance_ticker() -> dict[str, Any] | None:
+    now = time.monotonic()
+    cached = binance_24h_cache.get("ticker")
+    if cached and now - binance_24h_cache.get("timestamp", 0.0) < BINANCE_TICKER_TTL_SECONDS:
+        return cached
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(BINANCE_TICKER_URL)
+            response.raise_for_status()
+            data = response.json()
+
+        binance_24h_cache["timestamp"] = now
+        binance_24h_cache["ticker"] = data
+        binance_24h_cache["volume"] = float(data.get("quoteVolume") or 0.0)
+        return data
+    except Exception as exc:
+        logger.warning("Failed to fetch Binance 24h ticker: %s", exc)
+        return cached
+
+
+async def get_binance_24h_volume() -> float | None:
+    now = time.monotonic()
+    cached = binance_24h_cache.get("volume")
+    if cached is not None and now - binance_24h_cache.get("timestamp", 0.0) < BINANCE_TICKER_TTL_SECONDS:
+        return cached
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(BINANCE_TICKER_URL)
+            response.raise_for_status()
+            data = response.json()
+            volume = float(data.get("quoteVolume") or 0.0)
+
+        binance_24h_cache["timestamp"] = now
+        binance_24h_cache["volume"] = volume
+        return volume
+    except Exception as exc:
+        logger.warning("Failed to fetch Binance 24h ticker: %s", exc)
+        return cached
+
+
+async def fetch_binance_klines(minutes: int) -> List[Dict[str, Any]]:
+    limit = max(1, min(minutes, 500))
+    url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit={limit}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            raw = response.json()
+    except Exception as exc:
+        logger.warning("Failed to fetch Binance klines: %s", exc)
+        return []
+
+    klines: List[Dict[str, Any]] = []
+    for candle in raw:
+        if len(candle) < 6:
+            continue
+        open_time = datetime.utcfromtimestamp(candle[0] / 1000)
+        klines.append({
+            "timestamp": open_time.isoformat(),
+            "open": float(candle[1]),
+            "high": float(candle[2]),
+            "low": float(candle[3]),
+            "close": float(candle[4]),
+            "volume": float(candle[5]),
+            "whale_volume": 0.0,
+        })
+
+    return klines
+
+
+def build_chart_data(minutes: int, interval_seconds: int = 60) -> List[Dict[str, Any]]:
+    if not recent_trades:
+        return []
+
+    interval_seconds = max(5, min(interval_seconds, 300))
+    now = datetime.utcnow().replace(microsecond=0)
+    bucket_count = max(int((minutes * 60) / interval_seconds), 1)
+    start = now - timedelta(seconds=interval_seconds * (bucket_count - 1))
+
+    buckets: Dict[datetime, Dict[str, Any]] = {}
+    institutional_bucket_volume: Dict[datetime, float] = {}
+
+    for event in list(recent_institutional_events):
+        bucket_epoch = int(event["timestamp"].timestamp() // interval_seconds) * interval_seconds
+        bucket_time = datetime.utcfromtimestamp(bucket_epoch)
+        institutional_bucket_volume[bucket_time] = institutional_bucket_volume.get(bucket_time, 0.0) + event["volume"]
+
+    for trade in list(recent_trades):
+        if trade["timestamp"] < start:
+            continue
+
+        bucket_epoch = int(trade["timestamp"].timestamp() // interval_seconds) * interval_seconds
+        bucket_time = datetime.utcfromtimestamp(bucket_epoch)
+        bucket = buckets.get(bucket_time)
+
+        if bucket is None:
+            bucket = {
+                "open": trade["price"],
+                "high": trade["price"],
+                "low": trade["price"],
+                "close": trade["price"],
+                "volume": 0.0,
+                "whale_volume": 0.0,
+            }
+        else:
+            bucket["high"] = max(bucket["high"], trade["price"])
+            bucket["low"] = min(bucket["low"], trade["price"])
+            bucket["close"] = trade["price"]
+
+        bucket["volume"] += trade["quantity"]
+        if whale_engine.is_whale_trade(trade["value"]):
+            bucket["whale_volume"] += trade["quantity"]
+
+        buckets[bucket_time] = bucket
+
+    chart_data: List[Dict[str, Any]] = []
+    last_close = None
+
+    for i in range(bucket_count):
+        bucket_time = start + timedelta(seconds=interval_seconds * i)
+        bucket = buckets.get(bucket_time)
+
+        if bucket:
+            last_close = bucket["close"]
+            bucket["whale_volume"] += institutional_bucket_volume.get(bucket_time, 0.0)
+            chart_data.append({
+                "timestamp": bucket_time.isoformat(),
+                **bucket,
+            })
+        elif last_close is not None:
+            chart_data.append({
+                "timestamp": bucket_time.isoformat(),
+                "open": last_close,
+                "high": last_close,
+                "low": last_close,
+                "close": last_close,
+                "volume": 0.0,
+                "whale_volume": 0.0,
+            })
+
+    return chart_data
+
+
+def build_bull_bear_payload() -> Dict[str, Any]:
+    metrics = whale_engine.calculate_bull_bear_power(list(recent_trades), whales_only=False)
+    return {
+        "type": "bull_bear_metrics",
+        "net_buy_volume": metrics["net_buy_volume"],
+        "net_sell_volume": metrics["net_sell_volume"],
+        "bull_power": metrics["bull_power"],
+        "momentum": metrics["momentum"],
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+def compute_price_change_10s(trades: List[Dict[str, Any]]) -> float | None:
+    if not trades:
+        return None
+    cutoff = datetime.utcnow() - timedelta(seconds=10)
+    recent = [t for t in trades if t["timestamp"] >= cutoff]
+    if len(recent) < 2:
+        return None
+    price_open = recent[0]["price"]
+    price_last = recent[-1]["price"]
+    if price_open <= 0:
+        return None
+    return ((price_last - price_open) / price_open) * 100
+
+
+async def build_hype_reality_payload() -> Dict[str, Any] | None:
+    ticker = await get_binance_ticker()
+    if not ticker:
+        return None
+
+    short_term_change = compute_price_change_10s(list(recent_trades))
+    price_change_percent = short_term_change
+    if price_change_percent is None:
+        price_change_percent = float(ticker.get("priceChangePercent") or 0.0)
+
+    social_hype_score = min(abs(price_change_percent) * 12, 100.0)
+    whale_score, whale_value = compute_whale_activity_score(list(recent_trades))
+
+    return {
+        "type": "hype_reality_metrics",
+        "social_hype_score": round(social_hype_score, 1),
+        "whale_activity_score": round(whale_score, 1),
+        "price_change_percent": price_change_percent,
+        "whale_value": whale_value,
+        "timestamp": datetime.utcnow().isoformat(),
+        "insight": interpret_hype_reality(social_hype_score, whale_score),
+    }
+
+
+def compute_whale_activity_score(
+    trades: List[Dict[str, Any]],
+    window_minutes: int = 10,
+) -> tuple[float, float]:
+    cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+    window_trades = [trade for trade in trades if trade["timestamp"] >= cutoff]
+    whale_value = sum(
+        trade["value"]
+        for trade in window_trades
+        if whale_engine.is_whale_trade(trade["value"])
+    )
+    total_value = sum(trade["value"] for trade in window_trades)
+
+    if total_value <= 0:
+        return 0.0, whale_value
+
+    whale_ratio = whale_value / max(total_value, 1.0)
+    volume_score = clamp(math.log(max(total_value / 1_000_000, 1.0), 50.0))
+    score = min((0.6 * volume_score + 0.4 * whale_ratio) * 100, 100.0)
+    return score, whale_value
+
+
+def interpret_hype_reality(social_score: float, whale_score: float) -> str:
+    if whale_score - social_score > 10:
+        return "Reality Check: Whale activity outpacing price hype. Institutional flows dominate."
+    if social_score - whale_score > 10:
+        return "Reality Check: Price hype outpacing whale activity. Retail-driven move risk."
+    return "Reality Check: Whale activity and price hype are in balance."
+
+
+# REST Endpoints
+@app.get("/")
 async def health_check():
-    """Detailed health check"""
+    return {"status": "ok", "message": "Whale Watcher Pro API is running"}
+
+
+@app.get("/api/health")
+async def health_status():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "active_connections": len(manager.active_connections),
-        "trades_in_window": len(trade_history)
+        "binance_connected": trade_stream.websocket is not None,
+        "order_book_connected": depth_stream.websocket is not None,
     }
+
 
 @app.get("/api/whale-trades")
 async def get_whale_trades(limit: int = 50):
-    """Get recent whale trades from database"""
-    try:
-        trades = await supabase_manager.get_recent_whale_trades(limit)
-        return {
-            "success": True,
-            "count": len(trades),
-            "trades": trades
-        }
-    except Exception as e:
-        logger.error(f"Error fetching whale trades: {e}")
-        return {"success": False, "error": str(e)}
+    whales = whale_engine.get_latest_whales(count=min(limit, 50))
+    return {"trades": whales, "count": len(whales)}
+
+
+
+
+@app.get("/api/bitcoin")
+async def get_bitcoin_ticker():
+    ticker = await get_binance_ticker()
+    if not ticker:
+        return {"success": False, "data": None}
+
+    return {
+        "success": True,
+        "data": {
+            "price": float(ticker.get("lastPrice") or 0.0),
+            "price_change_percent": float(ticker.get("priceChangePercent") or 0.0),
+            "quote_volume": float(ticker.get("quoteVolume") or 0.0),
+            "base_volume": float(ticker.get("volume") or 0.0),
+        },
+    }
+
 
 @app.get("/api/statistics")
 async def get_statistics():
-    """Get trading statistics"""
-    if not trade_history:
-        return {
-            "success": True,
-            "stats": {
-                "total_trades": 0,
-                "whale_trades": 0,
-                "avg_price": 0,
-                "high_price": 0,
-                "low_price": 0
-            }
-        }
-    
-    prices = [t['price'] for t in trade_history]
-    whale_count = len([t for t in trade_history if whale_engine.is_whale_trade(t['value'])])
-    
+    trades = list(recent_trades)
+    total_volume = sum(t["value"] for t in trades)
+    whale_trades = [t for t in trades if whale_engine.is_whale_trade(t["value"])]
+    binance_volume_24h = await get_binance_24h_volume()
+
     return {
-        "success": True,
-        "stats": {
-            "total_trades": len(trade_history),
-            "whale_trades": whale_count,
-            "avg_price": sum(prices) / len(prices),
-            "high_price": max(prices),
-            "low_price": min(prices),
-            "volume_24h": sum([t['value'] for t in trade_history])
-        }
+        "total_trades": len(trades),
+        "total_volume_24h": binance_volume_24h if binance_volume_24h is not None else total_volume,
+        "total_volume_since_start": total_volume,
+        "total_whale_trades": len(whale_trades),
+        "average_trade_value": total_volume / max(len(trades), 1),
+        "timestamp": datetime.utcnow().isoformat(),
     }
+
 
 @app.get("/api/chart-data")
-async def get_chart_data(minutes: int = 60):
-    """Get aggregated chart data for frontend"""
-    if not trade_history:
-        return {"success": True, "data": []}
-    
-    # Aggregate trades by minute
-    aggregated = {}
-    for trade in trade_history:
-        minute_key = trade['timestamp'].replace(second=0, microsecond=0)
-        if minute_key not in aggregated:
-            aggregated[minute_key] = {
-                'timestamp': minute_key.isoformat(),
-                'open': trade['price'],
-                'high': trade['price'],
-                'low': trade['price'],
-                'close': trade['price'],
-                'volume': 0,
-                'whale_volume': 0
-            }
-        
-        agg = aggregated[minute_key]
-        agg['high'] = max(agg['high'], trade['price'])
-        agg['low'] = min(agg['low'], trade['price'])
-        agg['close'] = trade['price']
-        agg['volume'] += trade['quantity']
-        
-        if whale_engine.is_whale_trade(trade['value']):
-            agg['whale_volume'] += trade['quantity']
-    
+async def get_chart_data(minutes: int = 60, interval_seconds: int = 60):
+    data = build_chart_data(minutes, interval_seconds=interval_seconds)
+    if not data:
+        data = await fetch_binance_klines(minutes)
+        interval_seconds = 60
+
     return {
         "success": True,
-        "data": sorted(aggregated.values(), key=lambda x: x['timestamp'])
+        "data": data,
+        "period_minutes": minutes,
+        "interval_seconds": interval_seconds,
     }
 
-# ============================================================================
-# WebSocket Endpoint
-# ============================================================================
 
-@app.websocket("/ws/trades")
+@app.get("/api/order-book")
+async def get_order_book():
+    return {
+        "success": True,
+        "data": latest_order_book,
+    }
+
+
+@app.get("/api/metrics")
+async def get_metrics():
+    hype_payload = await build_hype_reality_payload()
+    return {
+        "success": True,
+        "bull_bear_metrics": build_bull_bear_payload(),
+        "hype_reality_metrics": hype_payload,
+    }
+
+
+# WebSocket endpoint for real-time updates
+@app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time trade updates"""
-    await manager.connect(websocket)
-    
-    try:
-        # Send initial data on connection
-        await websocket.send_json({
-            'type': 'connection',
-            'message': 'Connected to Whale Watcher Pro',
-            'timestamp': datetime.utcnow().isoformat()
-        })
-        
-        # Keep connection alive and listen for messages
-        while True:
-            data = await websocket.receive_text()
-            
-            # Echo received message (can be extended for client commands)
-            if data == "ping":
-                await websocket.send_json({
-                    'type': 'pong',
-                    'timestamp': datetime.utcnow().isoformat()
-                })
-    
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        logger.info("WebSocket disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        manager.disconnect(websocket)
+    await websocket.accept()
+    connected_clients.add(websocket)
+    logger.info("Client connected via WebSocket")
 
-# ============================================================================
-# Run Server
-# ============================================================================
+    try:
+        await websocket.send_json({
+            "type": "connection",
+            "message": "Connected to Whale Watcher Pro",
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+        while True:
+            await asyncio.sleep(1)
+
+    except WebSocketDisconnect:
+        connected_clients.discard(websocket)
+        logger.info("Client disconnected")
+    except Exception as exc:
+        logger.error("WebSocket error: %s", exc)
+        connected_clients.discard(websocket)
+
+
+async def stream_binance_trades() -> None:
+    async for trade in trade_stream.stream_trades():
+        parsed = parse_trade(trade)
+        recent_trades.append(parsed)
+
+        institutional_detector.ingest_trade(
+            price=parsed["price"],
+            qty=parsed["quantity"],
+            is_buyer_maker=parsed["is_buyer_maker"],
+            ts_ms=int(parsed["timestamp"].timestamp() * 1000),
+        )
+        event = institutional_detector.maybe_evaluate()
+        if event:
+            recent_institutional_events.append({
+                "timestamp": datetime.utcnow(),
+                "volume": event["features"]["vol_10s"],
+            })
+            last_trade = recent_trades[-1] if recent_trades else parsed
+            bull_bear = whale_engine.calculate_bull_bear_power(list(recent_trades), whales_only=False)
+            institutional_alert = {
+                "type": "whale_alert",
+                "trade_id": int(time.time() * 1000),
+                "timestamp": datetime.utcnow().isoformat(),
+                "price": last_trade["price"],
+                "quantity": last_trade["quantity"],
+                "trade_value": event["features"]["vol_10s"],
+                "is_buy": event["side"] == "BUY",
+                "whale_score": event["score"] / 100.0,
+                "bull_bear_sentiment": bull_bear["bull_power"],
+                "similar_patterns": [],
+                "label": event["label"],
+            }
+            whale_engine.record_whale_trade(institutional_alert)
+            await broadcast(institutional_alert)
+            await broadcast({"type": "institutional_execution", **event})
+
+        if whale_engine.is_whale_trade(parsed["value"]):
+            whale_score = whale_engine.calculate_whale_score(parsed["value"])
+            similar_patterns = whale_engine.find_similar_patterns(
+                parsed["value"],
+                parsed["is_buy"],
+                list(recent_trades),
+            )
+            metrics = whale_engine.calculate_bull_bear_power(list(recent_trades))
+
+            whale_alert = {
+                "type": "whale_alert",
+                "trade_id": parsed["trade_id"],
+                "timestamp": parsed["timestamp"].isoformat(),
+                "price": parsed["price"],
+                "quantity": parsed["quantity"],
+                "trade_value": parsed["value"],
+                "is_buy": parsed["is_buy"],
+                "whale_score": whale_score,
+                "bull_bear_sentiment": metrics["bull_power"],
+                "similar_patterns": similar_patterns,
+            }
+
+            whale_engine.record_whale_trade(whale_alert)
+            await broadcast(whale_alert)
+
+
+async def stream_binance_order_book() -> None:
+    global latest_order_book
+    global last_order_book_emit
+
+    async for depth in depth_stream.stream_depth():
+        latest_order_book = {
+            "last_update_id": depth.get("last_update_id"),
+            "bids": depth.get("bids", []),
+            "asks": depth.get("asks", []),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        now = time.monotonic()
+        if now - last_order_book_emit >= 1.0:
+            last_order_book_emit = now
+            await broadcast({
+                "type": "order_book",
+                "data": latest_order_book,
+            })
+
+
+async def emit_bull_bear_metrics() -> None:
+    while True:
+        await asyncio.sleep(5)
+        await broadcast(build_bull_bear_payload())
+
+
+async def emit_hype_reality_metrics() -> None:
+    while True:
+        await asyncio.sleep(10)
+        payload = await build_hype_reality_payload()
+        if payload:
+            await broadcast(payload)
+
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(stream_binance_trades())
+    asyncio.create_task(stream_binance_order_book())
+    asyncio.create_task(emit_bull_bear_metrics())
+    asyncio.create_task(emit_hype_reality_metrics())
+    logger.info("Live Binance tasks started")
+
 
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000,
-        log_level="info"
-    )
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
