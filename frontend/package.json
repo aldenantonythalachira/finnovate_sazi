@@ -1,0 +1,40 @@
+{
+  "name": "whale-watcher-pro",
+  "version": "1.0.0",
+  "description": "Real-time cryptocurrency whale detection and visualization dashboard",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@react-three/drei": "^9.88.0",
+    "@react-three/fiber": "^8.15.0",
+    "@supabase/supabase-js": "^2.38.0",
+    "autoprefixer": "^10.4.0",
+    "axios": "^1.6.0",
+    "date-fns": "^2.30.0",
+    "framer-motion": "^10.16.0",
+    "lucide-react": "^0.292.0",
+    "next": "^14.0.0",
+    "postcss": "^8.4.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-hot-toast": "^2.4.0",
+    "recharts": "^2.10.0",
+    "socket.io-client": "^4.7.0",
+    "tailwindcss": "^3.3.0",
+    "three": "^0.182.0",
+    "zustand": "^4.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "@types/three": "^0.158.0",
+    "typescript": "^5.3.0"
+  }
+}
