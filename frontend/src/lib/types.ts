@@ -29,6 +29,42 @@ export interface BullBearMetrics {
   timestamp: string;
 }
 
+export interface HypeRealityMetrics {
+  social_hype_score: number; // 0-100
+  whale_activity_score: number; // 0-100
+  price_change_percent: number;
+  whale_value: number;
+  insight: string;
+  timestamp: string;
+}
+
+export interface InstitutionalExecutionEvent {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  label: string;
+  score: number;
+  confidence: number;
+  features: {
+    size_score: number;
+    slicing_score: number;
+    absorption_score: number;
+    aggression_score: number;
+    impact_anomaly_score: number;
+    flow_ratio_10s: number;
+    flow_ratio_60s: number;
+    range_10s: number;
+    vol_10s: number;
+  };
+  ts: string;
+}
+
+export interface OrderBookSnapshot {
+  last_update_id: number | null;
+  bids: [string, string][];
+  asks: [string, string][];
+  timestamp: string | null;
+}
+
 export interface ChartDataPoint {
   timestamp: string;
   open: number;

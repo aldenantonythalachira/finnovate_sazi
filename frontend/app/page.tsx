@@ -1,12 +1,14 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useTradeStore } from '@/store/tradeStore';
 import { WhaleAlertFeed } from '@/components/WhaleAlertFeed';
 import { PriceChart } from '@/components/PriceChart';
 import { BullBearMeter } from '@/components/BullBearMeter';
+import { InstitutionalExecutionPanel } from '@/components/InstitutionalExecutionPanel';
+import { OrderBookPanel } from '@/components/OrderBookPanel';
 // import { ThreeDVisualizer } from '@/components/ThreeDVisualizer'; // Disabled: incompatible with latest Next.js
 import { BitcoinInfo } from '@/components/BitcoinInfo';
 import { ChartDataPoint, Trade3D } from '@/lib/types';
@@ -16,10 +18,15 @@ export default function Home() {
   const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
   const [trades3D, setTrades3D] = useState<Trade3D[]>([]);
   const [loadingChart, setLoadingChart] = useState(false);
+  const hasLoadedChartRef = useRef(false);
+  const [volume24h, setVolume24h] = useState<number | null>(null);
 
   const {
     whaleAlerts,
     bullBearMetrics,
+    hypeRealityMetrics,
+    institutionalEvents,
+    orderBook,
     isConnected,
     clearAlerts,
   } = useWebSocket('ws://localhost:8000/ws');
@@ -27,9 +34,11 @@ export default function Home() {
   // Fetch chart data on mount and periodically
   useEffect(() => {
     const fetchChartData = async () => {
-      setLoadingChart(true);
+      if (!hasLoadedChartRef.current) {
+        setLoadingChart(true);
+      }
       try {
-        const res = await fetch('http://localhost:8000/api/chart-data?minutes=60');
+        const res = await fetch('http://localhost:8000/api/chart-data?minutes=60&interval_seconds=60');
         if (res.ok) {
           const data = await res.json();
           if (data.success && data.data) {
@@ -39,12 +48,37 @@ export default function Home() {
       } catch (error) {
         console.error('Error fetching chart data:', error);
       } finally {
-        setLoadingChart(false);
+        if (!hasLoadedChartRef.current) {
+          setLoadingChart(false);
+          hasLoadedChartRef.current = true;
+        }
       }
     };
 
     fetchChartData();
-    const interval = setInterval(fetchChartData, 30000); // Refresh every 30 seconds
+    const interval = setInterval(fetchChartData, 60000); // Refresh every 60 seconds
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Fetch 24h ticker data
+  useEffect(() => {
+    const fetchTicker = async () => {
+      try {
+        const res = await fetch('http://localhost:8000/api/bitcoin');
+        if (res.ok) {
+          const payload = await res.json();
+          if (payload.success && payload.data) {
+            setVolume24h(payload.data.base_volume ?? null);
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching BTC ticker:', error);
+      }
+    };
+
+    fetchTicker();
+    const interval = setInterval(fetchTicker, 30000);
 
     return () => clearInterval(interval);
   }, []);
@@ -93,6 +127,18 @@ export default function Home() {
       );
     }
   }, [whaleAlerts.length]);
+
+  const formatHypeLabel = (score: number) => {
+    if (score >= 70) return 'High';
+    if (score >= 40) return 'Moderate';
+    return 'Low';
+  };
+
+  const formatActivityLabel = (score: number) => {
+    if (score >= 70) return 'High Activity';
+    if (score >= 40) return 'Moderate Activity';
+    return 'Low Activity';
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-blue-950/20 to-gray-950">
@@ -174,7 +220,7 @@ export default function Home() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.2 }}
         >
-          <PriceChart data={chartData} loading={loadingChart} />
+          <PriceChart data={chartData} loading={loadingChart} volume24h={volume24h ?? undefined} />
         </motion.div>
 
         {/* Analytics section */}
@@ -186,7 +232,7 @@ export default function Home() {
         >
           <BullBearMeter metrics={bullBearMetrics} />
 
-          {/* Sentiment placeholder */}
+          {/* Hype vs Reality */}
           <motion.div
             whileHover={{ scale: 1.02 }}
             className="bg-gray-900/50 border border-gray-700 rounded-lg p-6"
@@ -194,38 +240,64 @@ export default function Home() {
             <h2 className="text-lg font-semibold text-white mb-4">
               Hype vs Reality Sentiment
             </h2>
-            <div className="space-y-4">
-              <div>
-                <p className="text-xs text-gray-400 mb-2">Social Hype Score</p>
-                <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: '65%' }}
-                    transition={{ duration: 0.8, delay: 0.5 }}
-                    className="h-full bg-gradient-to-r from-orange-500 to-red-500"
-                  />
+            {!hypeRealityMetrics ? (
+              <p className="text-sm text-gray-400">Waiting for live sentiment data...</p>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs text-gray-400 mb-2">Social Hype Score</p>
+                  <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${Math.min(hypeRealityMetrics.social_hype_score, 100)}%` }}
+                      transition={{ duration: 0.8, delay: 0.2 }}
+                      className="h-full bg-gradient-to-r from-orange-500 to-red-500"
+                    />
+                  </div>
+                  <p className="text-sm text-orange-400 mt-1">
+                    {hypeRealityMetrics.social_hype_score.toFixed(0)}/100 -{' '}
+                    {formatHypeLabel(hypeRealityMetrics.social_hype_score)} Hype
+                  </p>
                 </div>
-                <p className="text-sm text-orange-400 mt-1">65/100 - Moderate Hype</p>
-              </div>
 
-              <div>
-                <p className="text-xs text-gray-400 mb-2">Whale Activity Score</p>
-                <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: '78%' }}
-                    transition={{ duration: 0.8, delay: 0.6 }}
-                    className="h-full bg-gradient-to-r from-green-500 to-blue-500"
-                  />
+                <div>
+                  <p className="text-xs text-gray-400 mb-2">Whale Activity Score</p>
+                  <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${Math.min(hypeRealityMetrics.whale_activity_score, 100)}%` }}
+                      transition={{ duration: 0.8, delay: 0.3 }}
+                      className="h-full bg-gradient-to-r from-green-500 to-blue-500"
+                    />
+                  </div>
+                  <p className="text-sm text-green-400 mt-1">
+                    {hypeRealityMetrics.whale_activity_score.toFixed(0)}/100 -{' '}
+                    {formatActivityLabel(hypeRealityMetrics.whale_activity_score)}
+                  </p>
                 </div>
-                <p className="text-sm text-green-400 mt-1">78/100 - High Activity</p>
-              </div>
 
-              <p className="text-xs text-gray-500 pt-4 border-t border-gray-700">
-                ⚠️ Reality Check: Whale activity is outpacing social sentiment. Strong fundamental interest detected.
-              </p>
-            </div>
+                <p className="text-xs text-gray-500 pt-4 border-t border-gray-700">
+                  {hypeRealityMetrics.insight}
+                </p>
+              </div>
+            )}
           </motion.div>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.4 }}
+        >
+          <InstitutionalExecutionPanel events={institutionalEvents} />
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.5 }}
+        >
+          <OrderBookPanel snapshot={orderBook} />
         </motion.div>
 
         {/* 3D Visualization - Disabled: incompatible with latest Next.js */}

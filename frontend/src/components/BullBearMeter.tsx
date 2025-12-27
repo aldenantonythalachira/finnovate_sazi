@@ -100,7 +100,7 @@ export function BullBearMeter({ metrics }: BullBearMeterProps) {
       <div className="space-y-3">
         <div>
           <div className="flex justify-between items-center mb-2">
-            <span className="text-sm font-semibold text-green-400">Buy Volume (Whales)</span>
+            <span className="text-sm font-semibold text-green-400">Buy Volume</span>
             <span className="text-sm font-mono text-gray-300">
               ${formatVolume(metrics.net_buy_volume)}
             </span>
@@ -127,7 +127,7 @@ export function BullBearMeter({ metrics }: BullBearMeterProps) {
 
         <div>
           <div className="flex justify-between items-center mb-2">
-            <span className="text-sm font-semibold text-red-400">Sell Volume (Whales)</span>
+            <span className="text-sm font-semibold text-red-400">Sell Volume</span>
             <span className="text-sm font-mono text-gray-300">
               ${formatVolume(metrics.net_sell_volume)}
             </span>

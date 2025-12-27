@@ -18,9 +18,10 @@ import { ChartDataPoint } from '@/lib/types';
 interface PriceChartProps {
   data: ChartDataPoint[];
   loading?: boolean;
+  volume24h?: number;
 }
 
-export function PriceChart({ data, loading = false }: PriceChartProps) {
+export function PriceChart({ data, loading = false, volume24h }: PriceChartProps) {
   if (loading) {
     return (
       <div className="w-full h-96 flex items-center justify-center bg-gray-900/50 rounded-lg border border-gray-700">
@@ -124,7 +125,9 @@ export function PriceChart({ data, loading = false }: PriceChartProps) {
           <div className="bg-gray-800 rounded p-3">
             <p className="text-gray-400 text-xs mb-1">24h Volume</p>
             <p className="text-xl font-bold text-green-400">
-              {data.reduce((sum, d) => sum + d.volume, 0).toFixed(2)} BTC
+              {volume24h !== undefined
+                ? `${volume24h.toFixed(2)} BTC`
+                : `${data.reduce((sum, d) => sum + d.volume, 0).toFixed(2)} BTC`}
             </p>
           </div>
           <div className="bg-gray-800 rounded p-3">

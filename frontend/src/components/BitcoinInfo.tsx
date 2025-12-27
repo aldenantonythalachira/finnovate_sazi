@@ -14,22 +14,29 @@ export function BitcoinInfo({ loading = false }: BitcoinInfoProps) {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // This would fetch from your backend API
-        // For now, using placeholder
-        const mockData = {
-          usd: 42500.50,
-          usd_market_cap: 831_000_000_000,
-          usd_24h_vol: 29_000_000_000,
-          usd_24h_change: 2.5,
-        };
-        setMetadata(mockData);
+        const res = await fetch('http://localhost:8000/api/bitcoin');
+        if (res.ok) {
+          const payload = await res.json();
+          if (payload.success && payload.data) {
+            setMetadata({
+              usd: payload.data.price,
+              usd_24h_change: payload.data.price_change_percent,
+              usd_24h_vol: payload.data.quote_volume,
+            });
+          }
+        }
 
-        // Fetch logo from CoinGecko directly
+        // Fetch logo + market cap from CoinGecko directly
         const logoRes = await fetch(
-          'https://api.coingecko.com/api/v3/coins/bitcoin?localization=false'
+          'https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&market_data=true'
         );
         const logoData = await logoRes.json();
-        setLogoUrl(logoData.image.large);
+        setLogoUrl(logoData.image?.large || '');
+
+        setMetadata((prev: any) => ({
+          ...(prev || {}),
+          usd_market_cap: logoData.market_data?.market_cap?.usd,
+        }));
       } catch (error) {
         console.error('Error fetching Bitcoin info:', error);
       }
@@ -51,6 +58,13 @@ export function BitcoinInfo({ loading = false }: BitcoinInfoProps) {
 
   const formatNumber = (num: number) => {
     return new Intl.NumberFormat('en-US').format(num);
+  };
+
+  const formatMarketCap = (num?: number) => {
+    if (typeof num !== 'number' || !Number.isFinite(num)) {
+      return 'N/A';
+    }
+    return `$${formatNumber(Math.round(num / 1_000_000_000))}B`;
   };
 
   return (
@@ -92,7 +106,7 @@ export function BitcoinInfo({ loading = false }: BitcoinInfoProps) {
         <div className="bg-gray-800 rounded p-3">
           <p className="text-gray-400 text-xs mb-1">Market Capitalization</p>
           <p className="text-xl font-bold text-purple-400">
-            ${formatNumber(Math.round(metadata.usd_market_cap / 1_000_000_000))}B
+            {formatMarketCap(metadata.usd_market_cap)}
           </p>
         </div>
 

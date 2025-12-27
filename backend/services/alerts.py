@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import Dict, Any
 
-from services.external_api import ExternalServicesManager
+from .external_api import ExternalServicesManager
 
 logger = logging.getLogger(__name__)
 
