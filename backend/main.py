@@ -12,6 +12,7 @@ import httpx
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
+from xml.etree import ElementTree
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,6 +52,11 @@ db_manager = SupabaseManager()
 
 BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
 BINANCE_TICKER_TTL_SECONDS = 30.0
+COINDESK_RSS_URLS = [
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://feeds.feedburner.com/CoinDesk",
+]
+COINDESK_NEWS_TTL_SECONDS = 120.0
 
 # In-memory state
 connected_clients: set[WebSocket] = set()
@@ -69,6 +75,10 @@ binance_24h_cache: Dict[str, Any] = {
     "timestamp": 0.0,
     "volume": None,
     "ticker": None,
+}
+coindesk_news_cache: Dict[str, Any] = {
+    "timestamp": 0.0,
+    "items": [],
 }
 
 
@@ -265,6 +275,52 @@ async def get_binance_24h_volume() -> float | None:
     cached = binance_24h_cache.get("volume")
     if cached is not None and now - binance_24h_cache.get("timestamp", 0.0) < BINANCE_TICKER_TTL_SECONDS:
         return cached
+
+
+async def get_coindesk_news(limit: int = 20) -> List[Dict[str, Any]]:
+    now = time.monotonic()
+    cached = coindesk_news_cache.get("items", [])
+    if cached and now - coindesk_news_cache.get("timestamp", 0.0) < COINDESK_NEWS_TTL_SECONDS:
+        return cached[:limit]
+
+    xml_text = None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; WhaleWatcherPro/1.0; +https://example.com)",
+        "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1",
+    }
+    for url in COINDESK_RSS_URLS:
+        try:
+            async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                xml_text = response.text
+                break
+        except Exception as exc:
+            logger.warning("Failed to fetch CoinDesk news from %s: %s", url, exc)
+            continue
+    if not xml_text:
+        return cached[:limit]
+
+    try:
+        root = ElementTree.fromstring(xml_text)
+        items = []
+        for item in root.findall(".//item"):
+            title = item.findtext("title") or ""
+            link = item.findtext("link") or ""
+            pub_date = item.findtext("pubDate") or ""
+            description = item.findtext("description") or ""
+            items.append({
+                "title": title.strip(),
+                "link": link.strip(),
+                "pub_date": pub_date.strip(),
+                "summary": description.strip(),
+            })
+        coindesk_news_cache["timestamp"] = now
+        coindesk_news_cache["items"] = items
+        return items[:limit]
+    except Exception as exc:
+        logger.warning("Failed to parse CoinDesk RSS: %s", exc)
+        return cached[:limit]
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -596,6 +652,12 @@ async def get_metrics():
         "bull_bear_metrics": build_bull_bear_payload(),
         "hype_reality_metrics": hype_payload,
     }
+
+
+@app.get("/api/news")
+async def get_news(limit: int = 20):
+    items = await get_coindesk_news(limit=limit)
+    return {"success": True, "count": len(items), "items": items}
 
 
 # WebSocket endpoint for real-time updates

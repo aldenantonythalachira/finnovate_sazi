@@ -13,6 +13,7 @@ const navItems = [
   { href: '/order-book', label: 'Order Book' },
   { href: '/visuals', label: 'Bubble Space' },
   { href: '/replay', label: 'Replay' },
+  { href: '/news', label: 'News' },
 ];
 
 function BitcoinIcon({ className }: { className?: string }) {
