@@ -51,6 +51,8 @@ BINANCE_TICKER_TTL_SECONDS = 30.0
 connected_clients: set[WebSocket] = set()
 recent_trades: deque = deque(maxlen=6000)
 recent_institutional_events: deque = deque(maxlen=300)
+pending_whale_severity: deque = deque(maxlen=500)
+replay_events: deque = deque(maxlen=20000)
 latest_order_book: Dict[str, Any] = {
     "last_update_id": None,
     "bids": [],
@@ -67,6 +69,121 @@ binance_24h_cache: Dict[str, Any] = {
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
+
+
+def record_replay_event(event_type: str, payload: Dict[str, Any], ts: datetime | None = None) -> None:
+    allowed = {"whale_alert", "whale_alert_update", "institutional_execution", "order_book"}
+    if event_type not in allowed:
+        return
+    event_ts = ts or datetime.utcnow()
+    replay_events.append({
+        "ts": int(event_ts.timestamp() * 1000),
+        "type": event_type,
+        "data": payload,
+    })
+
+
+def compute_severity_score(move_pct: float) -> int:
+    # 0.2% per severity step, capped 1-10
+    score = int(round(move_pct / 0.2))
+    return max(1, min(score, 10))
+
+
+def get_recent_trades(window_seconds: int) -> List[Dict[str, Any]]:
+    cutoff = datetime.utcnow() - timedelta(seconds=window_seconds)
+    return [trade for trade in list(recent_trades) if trade["timestamp"] >= cutoff]
+
+
+def compute_price_change_pct(window_minutes: int) -> float:
+    cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+    window = [trade for trade in list(recent_trades) if trade["timestamp"] >= cutoff]
+    if len(window) < 2:
+        return 0.0
+    price_open = window[0]["price"]
+    price_last = window[-1]["price"]
+    if price_open <= 0:
+        return 0.0
+    return ((price_last - price_open) / price_open) * 100
+
+
+def detect_liquidity_wall(side: str, price: float) -> bool:
+    if not latest_order_book.get("bids") or not latest_order_book.get("asks"):
+        return False
+    levels = latest_order_book["asks"] if side == "BUY" else latest_order_book["bids"]
+    parsed = []
+    for level_price, level_qty in levels[:20]:
+        try:
+            level_price_f = float(level_price)
+            level_qty_f = float(level_qty)
+        except ValueError:
+            continue
+        parsed.append((level_price_f, level_qty_f))
+    if not parsed:
+        return False
+    values = [p * q for p, q in parsed]
+    median_value = sorted(values)[len(values) // 2]
+    wall_threshold = max(median_value * 5, max(values))
+    for (level_price, level_qty), level_value in zip(parsed, values):
+        if level_value < wall_threshold:
+            continue
+        distance_pct = abs(level_price - price) / price
+        if distance_pct <= 0.0015:
+            return True
+    return False
+
+
+def classify_whale_action(trade: Dict[str, Any]) -> str | None:
+    trade_value = trade["value"]
+    side = "BUY" if trade["is_buy"] else "SELL"
+
+    price_pump = compute_price_change_pct(10)
+    if side == "SELL" and price_pump >= 1.5:
+        return "Distribution Sell"
+
+    if detect_liquidity_wall(side, trade["price"]) and trade_value >= 1_000_000:
+        return "Liquidity Grab"
+
+    recent_2m = [t for t in get_recent_trades(120) if t["is_buy"]]
+    support_count = sum(
+        1 for t in recent_2m
+        if abs(t["price"] - trade["price"]) / trade["price"] <= 0.001
+    )
+    if support_count >= 6 and side == "BUY":
+        return "Support Defense"
+
+    recent_10s = get_recent_trades(10)
+    if len(recent_10s) >= 5:
+        prices = [t["price"] for t in recent_10s]
+        price_open = prices[0]
+        price_last = prices[-1]
+        move_10s = abs(price_last - price_open) / price_open if price_open else 0.0
+        range_10s = (max(prices) - min(prices)) / price_last if price_last else 0.0
+        if trade_value >= 500_000 and move_10s <= 0.0005 and range_10s <= 0.001:
+            return "Fake Pressure"
+
+    return None
+
+
+def update_pending_severity(current_price: float, now: datetime) -> List[Dict[str, Any]]:
+    updates: List[Dict[str, Any]] = []
+    remaining = deque(maxlen=pending_whale_severity.maxlen)
+    for item in list(pending_whale_severity):
+        if now - item["timestamp"] < timedelta(minutes=1):
+            remaining.append(item)
+            continue
+        price_at_alert = item["price"]
+        if not price_at_alert:
+            continue
+        move_pct = abs(current_price - price_at_alert) / price_at_alert * 100
+        severity = compute_severity_score(move_pct)
+        updates.append({
+            "trade_id": item["trade_id"],
+            "severity_score": severity,
+            "price_move_pct": round(move_pct, 4),
+        })
+    pending_whale_severity.clear()
+    pending_whale_severity.extend(remaining)
+    return updates
 
 
 def parse_trade(trade: Dict[str, Any]) -> Dict[str, Any]:
@@ -89,6 +206,24 @@ def parse_trade(trade: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def broadcast(payload: Dict[str, Any]) -> None:
+    event_type = payload.get("type")
+    if event_type in {"whale_alert", "whale_alert_update", "institutional_execution", "order_book"}:
+        if event_type == "order_book":
+            replay_payload = payload.get("data", {})
+            ts_value = replay_payload.get("timestamp")
+        else:
+            replay_payload = {key: value for key, value in payload.items() if key != "type"}
+            ts_value = replay_payload.get("timestamp") or replay_payload.get("ts")
+
+        replay_ts = None
+        if isinstance(ts_value, str):
+            try:
+                replay_ts = datetime.fromisoformat(ts_value)
+            except ValueError:
+                replay_ts = None
+
+        record_replay_event(event_type, replay_payload, replay_ts)
+
     if not connected_clients:
         return
 
@@ -279,13 +414,25 @@ async def build_hype_reality_payload() -> Dict[str, Any] | None:
     if not ticker:
         return None
 
-    short_term_change = compute_price_change_10s(list(recent_trades))
-    price_change_percent = short_term_change
+    trades = list(recent_trades)
+    short_term_change = compute_price_change_10s(trades)
+    five_min_change = compute_price_change_pct(5)
+    price_change_percent = five_min_change or short_term_change
     if price_change_percent is None:
         price_change_percent = float(ticker.get("priceChangePercent") or 0.0)
 
-    social_hype_score = min(abs(price_change_percent) * 12, 100.0)
-    whale_score, whale_value = compute_whale_activity_score(list(recent_trades))
+    cutoff_5m = datetime.utcnow() - timedelta(minutes=5)
+    cutoff_30m = datetime.utcnow() - timedelta(minutes=30)
+    volume_5m = sum(t["value"] for t in trades if t["timestamp"] >= cutoff_5m)
+    volume_30m = sum(t["value"] for t in trades if t["timestamp"] >= cutoff_30m)
+    baseline_5m = volume_30m / 6 if volume_30m > 0 else 0.0
+    volume_ratio = volume_5m / baseline_5m if baseline_5m > 0 else 1.0
+    volume_burst = clamp((volume_ratio - 1.0) / 3.0, 0.0, 1.0)
+
+    price_component = min(abs(price_change_percent) * 40, 70.0)
+    volume_component = volume_burst * 30.0
+    social_hype_score = min(price_component + volume_component, 100.0)
+    whale_score, whale_value = compute_whale_activity_score(trades)
 
     return {
         "type": "hype_reality_metrics",
@@ -300,14 +447,15 @@ async def build_hype_reality_payload() -> Dict[str, Any] | None:
 
 def compute_whale_activity_score(
     trades: List[Dict[str, Any]],
-    window_minutes: int = 10,
+    window_minutes: int = 30,
+    whale_threshold: float = 100_000,
 ) -> tuple[float, float]:
     cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
     window_trades = [trade for trade in trades if trade["timestamp"] >= cutoff]
     whale_value = sum(
         trade["value"]
         for trade in window_trades
-        if whale_engine.is_whale_trade(trade["value"])
+        if trade["value"] >= whale_threshold
     )
     total_value = sum(trade["value"] for trade in window_trades)
 
@@ -358,13 +506,19 @@ async def get_bitcoin_ticker():
     if not ticker:
         return {"success": False, "data": None}
 
+    price = float(ticker.get("lastPrice") or 0.0)
+    quote_volume = float(ticker.get("quoteVolume") or 0.0)
+    base_volume = float(ticker.get("volume") or 0.0)
+    if quote_volume <= 0 and base_volume > 0 and price > 0:
+        quote_volume = base_volume * price
+
     return {
         "success": True,
         "data": {
-            "price": float(ticker.get("lastPrice") or 0.0),
+            "price": price,
             "price_change_percent": float(ticker.get("priceChangePercent") or 0.0),
-            "quote_volume": float(ticker.get("quoteVolume") or 0.0),
-            "base_volume": float(ticker.get("volume") or 0.0),
+            "quote_volume": quote_volume,
+            "base_volume": base_volume,
         },
     }
 
@@ -403,10 +557,30 @@ async def get_chart_data(minutes: int = 60, interval_seconds: int = 60):
 
 @app.get("/api/order-book")
 async def get_order_book():
+    timestamp = latest_order_book.get("timestamp")
+    replay_ts = None
+    if isinstance(timestamp, str):
+        try:
+            replay_ts = datetime.fromisoformat(timestamp)
+        except ValueError:
+            replay_ts = None
+    record_replay_event("order_book", latest_order_book, replay_ts)
     return {
         "success": True,
         "data": latest_order_book,
     }
+
+
+@app.get("/api/replay")
+async def get_replay(minutes: int = 60):
+    safe_minutes = max(0, minutes)
+    cutoff_ms = int((datetime.utcnow() - timedelta(minutes=safe_minutes)).timestamp() * 1000)
+    events = [
+        event
+        for event in list(replay_events)
+        if int(event.get("ts", 0)) >= cutoff_ms
+    ]
+    return {"success": True, "count": len(events), "events": events}
 
 
 @app.get("/api/metrics")
@@ -448,6 +622,16 @@ async def stream_binance_trades() -> None:
     async for trade in trade_stream.stream_trades():
         parsed = parse_trade(trade)
         recent_trades.append(parsed)
+        last_trade = recent_trades[-1] if recent_trades else parsed
+        await broadcast({
+            "type": "trade",
+            "trade_id": parsed["trade_id"],
+            "timestamp": parsed["timestamp"].isoformat(),
+            "price": parsed["price"],
+            "quantity": parsed["quantity"],
+            "trade_value": parsed["value"],
+            "is_buy": parsed["is_buy"],
+        })
 
         institutional_detector.ingest_trade(
             price=parsed["price"],
@@ -462,7 +646,6 @@ async def stream_binance_trades() -> None:
                 "volume": event["features"]["vol_10s"],
                 "price": last_trade["price"],
             })
-            last_trade = recent_trades[-1] if recent_trades else parsed
             bull_bear = whale_engine.calculate_bull_bear_power(list(recent_trades), whales_only=False)
             institutional_value = event["features"]["vol_10s"]
             price = last_trade["price"]
@@ -479,9 +662,20 @@ async def stream_binance_trades() -> None:
                 "bull_bear_sentiment": bull_bear["bull_power"],
                 "similar_patterns": [],
                 "label": event["label"],
+                "action_label": classify_whale_action({
+                    **parsed,
+                    "price": price,
+                    "value": institutional_value,
+                    "is_buy": event["side"] == "BUY",
+                }),
             }
             whale_engine.record_whale_trade(institutional_alert)
             await broadcast(institutional_alert)
+            pending_whale_severity.append({
+                "trade_id": institutional_alert["trade_id"],
+                "price": institutional_alert["price"],
+                "timestamp": datetime.utcnow(),
+            })
             await broadcast({"type": "institutional_execution", **event})
 
         if whale_engine.is_whale_trade(parsed["value"]):
@@ -504,10 +698,21 @@ async def stream_binance_trades() -> None:
                 "whale_score": whale_score,
                 "bull_bear_sentiment": metrics["bull_power"],
                 "similar_patterns": similar_patterns,
+                "action_label": classify_whale_action(parsed),
             }
 
             whale_engine.record_whale_trade(whale_alert)
             await broadcast(whale_alert)
+            pending_whale_severity.append({
+                "trade_id": whale_alert["trade_id"],
+                "price": whale_alert["price"],
+                "timestamp": parsed["timestamp"],
+            })
+
+        severity_updates = update_pending_severity(parsed["price"], parsed["timestamp"])
+        for update in severity_updates:
+            whale_engine.update_whale_trade(update["trade_id"], update)
+            await broadcast({"type": "whale_alert_update", **update})
 
 
 async def stream_binance_order_book() -> None:
