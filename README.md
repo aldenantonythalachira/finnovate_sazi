@@ -8,7 +8,7 @@
 
 ✅ **Real-Time Whale Detection**: Identifies large trades instantly  
 ✅ **Bull/Bear Sentiment**: Real-time market sentiment analysis   
-✅ **WebSocket Streaming**: Live updates via Socket.io  
+✅ **WebSocket Streaming**: Live updates
 ✅ **Supabase Integration**: PostgreSQL database  
 ✅ **Framer Motion**: Smooth, polished UI animations  
 
