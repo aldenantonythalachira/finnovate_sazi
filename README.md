@@ -1,4 +1,4 @@
-<img width="1758" height="674" alt="image" src="https://github.com/user-attachments/assets/6c7de2e9-336f-4ef2-9652-3b791704fe26" /># Whale Watcher Pro
+# Whale Watcher Pro
 
 Real-time BTC/USDT whale detection and market visualization. The app streams Binance trades and order book data, detects institutional execution behavior, and presents a multi-tab dashboard for analysis and replay.
 
