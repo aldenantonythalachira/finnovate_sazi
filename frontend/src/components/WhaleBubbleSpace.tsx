@@ -54,7 +54,8 @@ const bubbleRadius = (tradeValue: number) => {
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(value, max));
 
 const getAlertTimestampMs = (iso: string) => {
-  const parsed = Date.parse(iso);
+  const normalized = /[zZ]|[+-]\d{2}:\d{2}$/.test(iso) ? iso : `${iso}Z`;
+  const parsed = Date.parse(normalized);
   if (!Number.isNaN(parsed)) {
     return parsed;
   }
@@ -78,6 +79,21 @@ const getMidPrice = (snapshot: OrderBookSnapshot | null) => {
     return 0;
   }
   return (bestBid + bestAsk) / 2;
+};
+
+const getSourceTrades = (
+  focusMode: 'all' | 'whales',
+  whaleAlerts: Array<ExecutedTrade | WhaleAlert>,
+  executedTrades: ExecutedTrade[]
+) => {
+  const combined = focusMode === 'whales'
+    ? whaleAlerts
+    : [...whaleAlerts, ...executedTrades];
+  const byId = new Map<number, ExecutedTrade | WhaleAlert>();
+  combined.forEach((trade) => {
+    byId.set(trade.trade_id, trade);
+  });
+  return Array.from(byId.values());
 };
 
 const getIntentColor = (isBuy: boolean, aggression: number) => {
@@ -173,7 +189,6 @@ export function WhaleBubbleSpace() {
       if (seenTradesRef.current.has(tradeId)) {
         return;
       }
-      seenTradesRef.current.add(tradeId);
 
       const scene = sceneRef.current;
       if (!scene) {
@@ -184,6 +199,8 @@ export function WhaleBubbleSpace() {
       if (ageMs >= LIFESPAN_MS) {
         return;
       }
+
+      seenTradesRef.current.add(tradeId);
 
       const radius = bubbleRadius(trade.trade_value);
       const geometry = getGeometry(radius);
@@ -303,8 +320,8 @@ export function WhaleBubbleSpace() {
 
   const hydrateFromTrades = useCallback(() => {
     const now = Date.now();
-    const trades = (focusMode === 'whales' ? whaleAlerts : executedTrades)
-      .slice(0, 200)
+    const trades = getSourceTrades(focusMode, whaleAlerts, executedTrades)
+      .slice(0, 300)
       .slice()
       .sort((a, b) => {
         const aTs = getAlertTimestampMs(a.timestamp) ?? 0;
@@ -338,6 +355,16 @@ export function WhaleBubbleSpace() {
       midPriceRef.current = newMid;
     }
   }, [orderBook]);
+
+  useEffect(() => {
+    if (midPriceRef.current || !executedTrades.length) {
+      return;
+    }
+    const fallbackPrice = executedTrades[0]?.price;
+    if (fallbackPrice) {
+      midPriceRef.current = fallbackPrice;
+    }
+  }, [executedTrades]);
 
   useEffect(() => {
     if (initializedRef.current) {
@@ -637,8 +664,8 @@ export function WhaleBubbleSpace() {
 
   useEffect(() => {
     const now = Date.now();
-    const source = (focusMode === 'whales' ? whaleAlerts : executedTrades)
-      .slice(0, 200)
+    const source = getSourceTrades(focusMode, whaleAlerts, executedTrades)
+      .slice(0, 300)
       .slice()
       .sort((a, b) => {
         const aTs = getAlertTimestampMs(a.timestamp) ?? 0;
@@ -646,6 +673,31 @@ export function WhaleBubbleSpace() {
         return aTs - bTs;
       });
     source.forEach((trade) => {
+      const ts = getAlertTimestampMs(trade.timestamp) ?? now;
+      const ageMs = now - ts;
+      const isWhale = focusMode === 'whales' || trade.trade_value >= WHALE_THRESHOLD;
+      const aggression = computeAggression(trade.trade_value, ts);
+      addBubble(trade, { isWhale, ageMs, aggression, qty: trade.quantity });
+    });
+  }, [executedTrades, whaleAlerts, focusMode, addBubble, computeAggression]);
+
+  useEffect(() => {
+    if (!sceneRef.current) {
+      return;
+    }
+    if (bubblesRef.current.length > 0) {
+      return;
+    }
+    const now = Date.now();
+    const recent = getSourceTrades(focusMode, whaleAlerts, executedTrades).filter((trade) => {
+      const ts = getAlertTimestampMs(trade.timestamp) ?? now;
+      return now - ts <= LIFESPAN_MS;
+    });
+    if (recent.length === 0) {
+      return;
+    }
+    seenTradesRef.current = new Set();
+    recent.forEach((trade) => {
       const ts = getAlertTimestampMs(trade.timestamp) ?? now;
       const ageMs = now - ts;
       const isWhale = focusMode === 'whales' || trade.trade_value >= WHALE_THRESHOLD;
@@ -702,6 +754,27 @@ export function WhaleBubbleSpace() {
 
     return () => clearInterval(interval);
   }, [executedTrades]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!sceneRef.current) {
+        return;
+      }
+      if (bubblesRef.current.length > 0) {
+        return;
+      }
+      if (!executedTrades.length && !whaleAlerts.length) {
+        return;
+      }
+      if (!midPriceRef.current && executedTrades.length) {
+        midPriceRef.current = executedTrades[0].price;
+      }
+      seenTradesRef.current = new Set();
+      hydrateFromTrades();
+    }, 1500);
+
+    return () => clearInterval(interval);
+  }, [executedTrades, whaleAlerts, hydrateFromTrades]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -773,6 +846,9 @@ export function WhaleBubbleSpace() {
         </div>
         <div className="pointer-events-none absolute left-3 bottom-2 text-[11px] text-slate-400">
           Lower price (buys)
+        </div>
+        <div className="pointer-events-none absolute right-3 bottom-2 text-[10px] text-slate-500">
+          trades {executedTrades.length} | whales {whaleAlerts.length} | bubbles {bubblesRef.current.length}
         </div>
 
         {patternOverlays.map((marker) => (

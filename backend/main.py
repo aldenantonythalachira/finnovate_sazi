@@ -14,14 +14,18 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware  
+from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 
 from .services.binance_stream import BinanceWebSocketManager, BinanceDepthStreamManager
 from .services.whale_detection import WhaleDetectionEngine, InstitutionalExecutionDetector
+from .services.database import SupabaseManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 app = FastAPI(
     title="Whale Watcher Pro API",
@@ -43,6 +47,7 @@ trade_stream = BinanceWebSocketManager("btcusdt")
 depth_stream = BinanceDepthStreamManager("btcusdt", depth_level=20)
 whale_engine = WhaleDetectionEngine()
 institutional_detector = InstitutionalExecutionDetector("BTCUSDT")
+db_manager = SupabaseManager()
 
 BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
 BINANCE_TICKER_TTL_SECONDS = 30.0
@@ -670,6 +675,7 @@ async def stream_binance_trades() -> None:
                 }),
             }
             whale_engine.record_whale_trade(institutional_alert)
+            await db_manager.insert_whale_trade(institutional_alert)
             await broadcast(institutional_alert)
             pending_whale_severity.append({
                 "trade_id": institutional_alert["trade_id"],
@@ -702,6 +708,7 @@ async def stream_binance_trades() -> None:
             }
 
             whale_engine.record_whale_trade(whale_alert)
+            await db_manager.insert_whale_trade(whale_alert)
             await broadcast(whale_alert)
             pending_whale_severity.append({
                 "trade_id": whale_alert["trade_id"],
@@ -747,6 +754,11 @@ async def emit_hype_reality_metrics() -> None:
         await asyncio.sleep(10)
         payload = await build_hype_reality_payload()
         if payload:
+            await db_manager.insert_sentiment_data(
+                timestamp=datetime.utcnow(),
+                sentiment_score=payload["social_hype_score"] / 10.0,
+                source="price_volume",
+            )
             await broadcast(payload)
 
 

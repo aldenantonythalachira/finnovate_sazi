@@ -53,14 +53,6 @@ export function OrderBookPanel({
     }));
   }, [snapshot, depth]);
 
-  if (!hasSnapshot) {
-    return (
-      <div className="bg-gray-900/50 border border-gray-700 rounded-lg p-6 text-gray-400">
-        Waiting for order book data...
-      </div>
-    );
-  }
-
   const maxBidQty = Math.max(...bids.map((b) => b.qty), 1);
   const maxAskQty = Math.max(...asks.map((a) => a.qty), 1);
   const bestBid = bids[0]?.price ?? 0;
@@ -228,6 +220,11 @@ export function OrderBookPanel({
   };
 
   return (
+    !hasSnapshot ? (
+      <div className="bg-gray-900/50 border border-gray-700 rounded-lg p-6 text-gray-400">
+        Waiting for order book data...
+      </div>
+    ) : (
     <motion.div
       initial={{ opacity: 0, y: 18 }}
       animate={{ opacity: 1, y: 0 }}
@@ -521,5 +518,6 @@ export function OrderBookPanel({
         }
       `}</style>
     </motion.div>
+    )
   );
 }

@@ -114,13 +114,6 @@ export function BitcoinInfo({ loading = false }: BitcoinInfoProps) {
           </p>
         </div>
 
-        {/* 24h Volume */}
-        <div className="bg-gray-800 rounded p-3">
-          <p className="text-gray-400 text-xs mb-1">24h Trading Volume</p>
-          <p className="text-xl font-bold text-cyan-400">
-            ${formatNumber(Math.round(metadata.usd_24h_vol / 1_000_000_000))}B
-          </p>
-        </div>
       </div>
     </motion.div>
   );

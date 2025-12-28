@@ -45,16 +45,20 @@ class SupabaseManager:
             return False
         
         try:
+            timestamp_value = whale_alert.get('timestamp')
+            if isinstance(timestamp_value, datetime):
+                timestamp_value = timestamp_value.isoformat()
+
             data = {
                 'trade_id': whale_alert['trade_id'],
-                'timestamp': whale_alert['timestamp'].isoformat(),
+                'timestamp': timestamp_value,
                 'price': whale_alert['price'],
                 'quantity': whale_alert['quantity'],
                 'trade_value': whale_alert['trade_value'],
                 'is_buy': whale_alert['is_buy'],
                 'whale_score': whale_alert['whale_score'],
-                'bull_bear_sentiment': whale_alert['bull_bear_sentiment'],
-                'similar_patterns': whale_alert.get('similar_patterns', [])
+                'bull_bear_sentiment': whale_alert.get('bull_bear_sentiment'),
+                'similar_patterns': whale_alert.get('similar_patterns', []),
             }
             
             response = self.client.table('whale_trades').insert(data).execute()
@@ -167,9 +171,10 @@ class SupabaseManager:
             return False
         
         try:
+            normalized_score = max(0.0, min(sentiment_score, 9.9999))
             data = {
                 'timestamp': timestamp.isoformat(),
-                'sentiment_score': sentiment_score,
+                'sentiment_score': normalized_score,
                 'source': source
             }
             
