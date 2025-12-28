@@ -8,6 +8,7 @@ import { TrendingUp, TrendingDown } from 'lucide-react';
 interface WhaleAlertCardProps {
   alert: WhaleAlert;
   onDismiss?: () => void;
+  isSelected?: boolean;
 }
 
 const containerVariants = {
@@ -38,7 +39,7 @@ const contentVariants = {
   visible: { opacity: 1, y: 0, transition: { delay: 0.2 } },
 };
 
-export function WhaleAlertCard({ alert, onDismiss }: WhaleAlertCardProps) {
+export function WhaleAlertCard({ alert, onDismiss, isSelected = false }: WhaleAlertCardProps) {
   const isBuy = alert.is_buy;
   const bgGradient = isBuy
     ? 'from-green-900/30 to-green-800/30'
@@ -69,7 +70,9 @@ export function WhaleAlertCard({ alert, onDismiss }: WhaleAlertCardProps) {
       initial="hidden"
       animate="visible"
       exit="exit"
-      className={`relative bg-gradient-to-br ${bgGradient} border ${borderColor} rounded-lg p-4 overflow-hidden`}
+      className={`relative bg-gradient-to-br ${bgGradient} border ${borderColor} rounded-lg p-4 overflow-hidden ${
+        isSelected ? 'ring-2 ring-blue-400/80 shadow-[0_0_18px_rgba(59,130,246,0.45)]' : ''
+      }`}
     >
       {/* Pulse background effect */}
       <motion.div

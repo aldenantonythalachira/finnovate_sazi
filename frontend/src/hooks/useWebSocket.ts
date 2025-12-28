@@ -8,19 +8,29 @@ import {
   HypeRealityMetrics,
   InstitutionalExecutionEvent,
   OrderBookSnapshot,
+  ExecutedTrade,
 } from '@/lib/types';
 
-export function useWebSocket(url: string = 'ws://localhost:8000/ws') {
+export function useWebSocket(
+  url: string = 'ws://localhost:8000/ws',
+  options: { enabled?: boolean } = {}
+) {
+  const enabled = options.enabled !== false;
   const {
     addWhaleAlert,
     updateBullBearMetrics,
     updateHypeRealityMetrics,
     addInstitutionalEvent,
     updateOrderBook,
+    updateWhaleAlert,
+    addExecutedTrade,
     setConnected,
   } = useTradeStore();
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     let ws: WebSocket | null = null;
 
     const connect = () => {
@@ -37,7 +47,7 @@ export function useWebSocket(url: string = 'ws://localhost:8000/ws') {
             const data = JSON.parse(event.data);
             
             if (data.type === 'whale_alert') {
-              console.log('🐋 Whale alert received:', data);
+              console.log('Whale alert received:', data);
               addWhaleAlert({
                 trade_id: data.trade_id,
                 timestamp: data.timestamp,
@@ -48,9 +58,13 @@ export function useWebSocket(url: string = 'ws://localhost:8000/ws') {
                 whale_score: data.whale_score,
                 bull_bear_sentiment: data.bull_bear_sentiment,
                 similar_patterns: data.similar_patterns ?? [],
+                label: data.label,
+                severity_score: data.severity_score,
+                price_move_pct: data.price_move_pct,
+                action_label: data.action_label,
               });
             } else if (data.type === 'bull_bear_metrics') {
-              console.log('📊 Bull/Bear metrics:', data);
+              console.log('Bull/Bear metrics:', data);
               updateBullBearMetrics({
                 net_buy_volume: data.net_buy_volume,
                 net_sell_volume: data.net_sell_volume,
@@ -58,6 +72,16 @@ export function useWebSocket(url: string = 'ws://localhost:8000/ws') {
                 momentum: data.momentum,
                 timestamp: data.timestamp,
               });
+            } else if (data.type === 'trade') {
+              const trade: ExecutedTrade = {
+                trade_id: data.trade_id,
+                timestamp: data.timestamp,
+                price: data.price,
+                quantity: data.quantity,
+                trade_value: data.trade_value,
+                is_buy: data.is_buy,
+              };
+              addExecutedTrade(trade);
             } else if (data.type === 'hype_reality_metrics') {
               const metrics: HypeRealityMetrics = {
                 social_hype_score: data.social_hype_score,
@@ -87,6 +111,11 @@ export function useWebSocket(url: string = 'ws://localhost:8000/ws') {
                 timestamp: data.data?.timestamp ?? null,
               };
               updateOrderBook(snapshot);
+            } else if (data.type === 'whale_alert_update') {
+              updateWhaleAlert(data.trade_id, {
+                severity_score: data.severity_score,
+                price_move_pct: data.price_move_pct,
+              });
             }
           } catch (e) {
             console.error('Error parsing WebSocket message:', e);
@@ -118,16 +147,22 @@ export function useWebSocket(url: string = 'ws://localhost:8000/ws') {
       }
     };
   }, [
+    enabled,
     url,
     addWhaleAlert,
     updateBullBearMetrics,
     updateHypeRealityMetrics,
     addInstitutionalEvent,
     updateOrderBook,
+    updateWhaleAlert,
+    addExecutedTrade,
     setConnected,
   ]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const fetchMetrics = async () => {
       try {
         const res = await fetch('http://localhost:8000/api/metrics');
@@ -150,9 +185,12 @@ export function useWebSocket(url: string = 'ws://localhost:8000/ws') {
     const interval = setInterval(fetchMetrics, 10000);
 
     return () => clearInterval(interval);
-  }, [updateBullBearMetrics, updateHypeRealityMetrics]);
+  }, [enabled, updateBullBearMetrics, updateHypeRealityMetrics]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const fetchOrderBook = async () => {
       try {
         const res = await fetch('http://localhost:8000/api/order-book');
@@ -172,7 +210,7 @@ export function useWebSocket(url: string = 'ws://localhost:8000/ws') {
     const interval = setInterval(fetchOrderBook, 5000);
 
     return () => clearInterval(interval);
-  }, [updateOrderBook]);
+  }, [enabled, updateOrderBook]);
 
   return useTradeStore();
 }

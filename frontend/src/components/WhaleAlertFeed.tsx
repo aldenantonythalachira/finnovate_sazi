@@ -9,6 +9,7 @@ interface WhaleAlertFeedProps {
   alerts: WhaleAlert[];
   onDismiss?: (tradeId: number) => void;
   maxVisible?: number;
+  selectedTradeId?: number | null;
 }
 
 const containerVariants = {
@@ -25,7 +26,8 @@ const containerVariants = {
 export function WhaleAlertFeed({ 
   alerts, 
   onDismiss, 
-  maxVisible = 5 
+  maxVisible = 5,
+  selectedTradeId = null,
 }: WhaleAlertFeedProps) {
   const visibleAlerts = alerts.slice(0, maxVisible);
 
@@ -53,10 +55,11 @@ export function WhaleAlertFeed({
       >
         <AnimatePresence mode="popLayout">
           {visibleAlerts.length > 0 ? (
-            visibleAlerts.map((alert) => (
+            visibleAlerts.map((alert, idx) => (
               <WhaleAlertCard
-                key={alert.trade_id}
+                key={`${alert.trade_id}-${alert.timestamp}-${idx}`}
                 alert={alert}
+                isSelected={selectedTradeId === alert.trade_id}
                 onDismiss={() => onDismiss?.(alert.trade_id)}
               />
             ))

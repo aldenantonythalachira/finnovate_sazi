@@ -18,11 +18,12 @@ export function BitcoinInfo({ loading = false }: BitcoinInfoProps) {
         if (res.ok) {
           const payload = await res.json();
           if (payload.success && payload.data) {
-            setMetadata({
+            setMetadata((prev: any) => ({
+              ...(prev || {}),
               usd: payload.data.price,
               usd_24h_change: payload.data.price_change_percent,
               usd_24h_vol: payload.data.quote_volume,
-            });
+            }));
           }
         }
 
@@ -43,6 +44,9 @@ export function BitcoinInfo({ loading = false }: BitcoinInfoProps) {
     };
 
     fetchData();
+    const interval = setInterval(fetchData, 15000);
+
+    return () => clearInterval(interval);
   }, []);
 
   if (loading || !metadata) {

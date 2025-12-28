@@ -22,6 +22,20 @@ interface PriceChartProps {
 }
 
 export function PriceChart({ data, loading = false, volume24h }: PriceChartProps) {
+  const timeFormatter = new Intl.DateTimeFormat('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  const dateTimeFormatter = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+
   if (loading) {
     return (
       <div className="w-full h-96 flex items-center justify-center bg-gray-900/50 rounded-lg border border-gray-700">
@@ -59,6 +73,14 @@ export function PriceChart({ data, loading = false, volume24h }: PriceChartProps
               stroke="#9CA3AF"
               style={{ fontSize: '12px' }}
               interval={Math.floor(data.length / 8)}
+              minTickGap={24}
+              tickFormatter={(value: string) => {
+                const parsed = Date.parse(value);
+                if (Number.isNaN(parsed)) {
+                  return value;
+                }
+                return timeFormatter.format(new Date(parsed));
+              }}
             />
             <YAxis yAxisId="left" stroke="#9CA3AF" style={{ fontSize: '12px' }} />
             <YAxis yAxisId="right" orientation="right" stroke="#9CA3AF" style={{ fontSize: '12px' }} />
@@ -69,6 +91,13 @@ export function PriceChart({ data, loading = false, volume24h }: PriceChartProps
                 border: '1px solid #374151',
                 borderRadius: '8px',
                 color: '#E5E7EB',
+              }}
+              labelFormatter={(value) => {
+                const parsed = Date.parse(String(value));
+                if (Number.isNaN(parsed)) {
+                  return value;
+                }
+                return dateTimeFormatter.format(new Date(parsed));
               }}
               formatter={(value: number) => {
                 if (typeof value === 'number') {
@@ -101,21 +130,10 @@ export function PriceChart({ data, loading = false, volume24h }: PriceChartProps
               dot={false}
             />
 
-            {/* Whale Volume Line */}
-            <Line
-              yAxisId="right"
-              type="monotone"
-              dataKey="whale_volume"
-              stroke="#F59E0B"
-              strokeWidth={3}
-              strokeDasharray="5 5"
-              name="Whale Volume (BTC)"
-              dot={false}
-            />
           </ComposedChart>
         </ResponsiveContainer>
 
-        <div className="mt-4 grid grid-cols-3 gap-4 text-sm">
+        <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
           <div className="bg-gray-800 rounded p-3">
             <p className="text-gray-400 text-xs mb-1">Current Price</p>
             <p className="text-xl font-bold text-blue-400">
@@ -128,12 +146,6 @@ export function PriceChart({ data, loading = false, volume24h }: PriceChartProps
               {volume24h !== undefined
                 ? `${volume24h.toFixed(2)} BTC`
                 : `${data.reduce((sum, d) => sum + d.volume, 0).toFixed(2)} BTC`}
-            </p>
-          </div>
-          <div className="bg-gray-800 rounded p-3">
-            <p className="text-gray-400 text-xs mb-1">Whale Volume</p>
-            <p className="text-xl font-bold text-amber-400">
-              {data.reduce((sum, d) => sum + d.whale_volume, 0).toFixed(2)} BTC
             </p>
           </div>
         </div>

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Toaster } from 'react-hot-toast';
 import './globals.css';
+import { AppShell } from '@/components/AppShell';
 
 export const metadata: Metadata = {
   title: 'Whale Watcher Pro | Real-Time Crypto Whale Detection',
@@ -21,7 +22,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="bg-gray-950 text-gray-100">
-        {children}
+        <AppShell>{children}</AppShell>
         <Toaster position="top-right" />
       </body>
     </html>

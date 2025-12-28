@@ -213,6 +213,14 @@ class WhaleDetectionEngine:
         """Get most recent detected whale trades"""
         return self.detected_whales[-count:]
 
+    def update_whale_trade(self, trade_id: int, updates: Dict[str, Any]) -> bool:
+        """Update a stored whale trade by trade_id"""
+        for trade in reversed(self.detected_whales):
+            if trade.get('trade_id') == trade_id:
+                trade.update(updates)
+                return True
+        return False
+
 
 class InstitutionalExecutionDetector:
     """

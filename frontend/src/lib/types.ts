@@ -10,6 +10,19 @@ export interface WhaleAlert {
   whale_score: number;
   similar_patterns: PatternMatch[];
   bull_bear_sentiment: number;
+  severity_score?: number;
+  price_move_pct?: number;
+  label?: string;
+  action_label?: string;
+}
+
+export interface ExecutedTrade {
+  trade_id: number;
+  timestamp: string;
+  price: number;
+  quantity: number;
+  trade_value: number;
+  is_buy: boolean;
 }
 
 export interface PatternMatch {
