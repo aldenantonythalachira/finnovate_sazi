@@ -1,10 +1,10 @@
-# Whale Watcher Pro - Comprehensive Setup Guide
+ Whale Watcher Pro - Comprehensive Setup Guide
 
-## 🐋 Project Overview
+ 🐋 Project Overview
 
 **Whale Watcher Pro** is a real-time cryptocurrency whale detection system that identifies and visualizes massive institutional trades in Bitcoin/USDT markets. The system provides instant alerts, 3D visualizations, sentiment analysis, and market impact predictions.
 
-### Key Features
+ Key Features
 
 ✅ **Real-Time Whale Detection**: Identifies large trades instantly  
 ✅ **Bull/Bear Sentiment**: Real-time market sentiment analysis   
