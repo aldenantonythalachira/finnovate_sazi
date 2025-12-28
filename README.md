@@ -17,7 +17,6 @@ Real-time BTC/USDT whale detection and market visualization. The app streams Bin
 
 Backend:
 - FastAPI (API + WebSocket)
-- httpx (REST calls to Binance and RSS)
 - websockets (Binance WS client)
 - supabase-py (database writes)
 - python-dotenv (env loading)
@@ -28,14 +27,11 @@ Frontend:
 - Zustand (state store)
 - Framer Motion (animations)
 - Recharts (charts)
-- Three.js (Bubble Space)
-- Lucide React (icons)
 
 ## Project Structure
 
 - `backend/` FastAPI app + Binance stream + detection + Supabase writer
 - `frontend/` Next.js app with multiple tabs
-- `docs/` Additional documentation
 
 ## Setup
 
