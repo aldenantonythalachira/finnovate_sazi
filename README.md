@@ -52,7 +52,7 @@ Frontend:
 ### Clone
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/aldenantonythalachira/finnovate_sazi
 cd finnovate_sazi
 ```
 
